@@ -19,6 +19,37 @@ import jax
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+import os
+from torch.utils.data import TensorDataset
+import numpy as np
+import torch
+import torchvision.transforms as transforms
+from torch.utils.data import Subset
+from torch.utils.data import DataLoader
+
+class Velocity(TensorDataset):
+    def __init__(self, path, transform=None):
+        self.tensors = np.load(path)
+
+        mini = np.min(self.tensors)
+        maxi = np.max(self.tensors)
+        self.tensors = (self.tensors - mini) / (maxi - mini)
+
+        self.tensors = torch.from_numpy(self.tensors).unsqueeze(1)
+
+        self.transform = transform
+
+    def __len__(self):
+        return self.tensors.size(0)
+
+    def __getitem__(self, index):
+        sample = self.tensors[index]
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
 
 def get_data_scaler(config):
   """Data normalizer. Assume data are always in [0, 1]."""
@@ -41,23 +72,30 @@ def get_data_inverse_scaler(config):
 def crop_resize(image, resolution):
   """Crop and resize an image to the given resolution."""
   crop = tf.minimum(tf.shape(image)[0], tf.shape(image)[1])
+
   h, w = tf.shape(image)[0], tf.shape(image)[1]
+
   image = image[(h - crop) // 2:(h + crop) // 2,
           (w - crop) // 2:(w + crop) // 2]
+
   image = tf.image.resize(
     image,
     size=(resolution, resolution),
     antialias=True,
     method=tf.image.ResizeMethod.BICUBIC)
+
   return tf.cast(image, tf.uint8)
 
 
 def resize_small(image, resolution):
   """Shrink an image to the given resolution."""
   h, w = image.shape[0], image.shape[1]
+
   ratio = resolution / min(h, w)
+
   h = tf.round(h * ratio, tf.int32)
   w = tf.round(w * ratio, tf.int32)
+
   return tf.image.resize(image, [h, w], antialias=True)
 
 
@@ -65,6 +103,7 @@ def central_crop(image, size):
   """Crop the center of an image to the given size."""
   top = (image.shape[0] - size) // 2
   left = (image.shape[1] - size) // 2
+
   return tf.image.crop_to_bounding_box(image, top, left, size, size)
 
 
@@ -81,6 +120,7 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
   """
   # Compute batch size for this worker.
   batch_size = config.training.batch_size if not evaluation else config.eval.batch_size
+
   if batch_size % jax.device_count() != 0:
     raise ValueError(f'Batch sizes ({batch_size} must be divided by'
                      f'the number of devices ({jax.device_count()})')
@@ -141,6 +181,10 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
   elif config.data.dataset in ['FFHQ', 'CelebAHQ']:
     dataset_builder = tf.data.TFRecordDataset(config.data.tfrecords_path)
     train_split_name = eval_split_name = 'train'
+  
+  #CUSTOM ADDITION
+  elif config.data.dataset in ['VELOCITY_FINE', 'VELOCITY_DIFFERENCE']:
+    pass
 
   else:
     raise NotImplementedError(
@@ -152,22 +196,33 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
       sample = tf.io.parse_single_example(d, features={
         'shape': tf.io.FixedLenFeature([3], tf.int64),
         'data': tf.io.FixedLenFeature([], tf.string)})
+
       data = tf.io.decode_raw(sample['data'], tf.uint8)
       data = tf.reshape(data, sample['shape'])
       data = tf.transpose(data, (1, 2, 0))
+
       img = tf.image.convert_image_dtype(data, tf.float32)
+
       if config.data.random_flip and not evaluation:
         img = tf.image.random_flip_left_right(img)
+
       if uniform_dequantization:
         img = (tf.random.uniform(img.shape, dtype=tf.float32) + img * 255.) / 256.
+
       return dict(image=img, label=None)
+
+  #THIS IS A CUSTOM ADDITION
+  elif config.data.dataset in ['VELOCITY_FINE', 'VELOCITY_DIFFERENCE']:
+    pass
 
   else:
     def preprocess_fn(d):
       """Basic preprocessing function scales data to [0, 1) and randomly flips."""
       img = resize_op(d['image'])
+
       if config.data.random_flip and not evaluation:
         img = tf.image.random_flip_left_right(img)
+        
       if uniform_dequantization:
         img = (tf.random.uniform(img.shape, dtype=tf.float32) + img * 255.) / 256.
 
@@ -179,18 +234,53 @@ def get_dataset(config, uniform_dequantization=False, evaluation=False):
     dataset_options.experimental_threading.private_threadpool_size = 48
     dataset_options.experimental_threading.max_intra_op_parallelism = 1
     read_config = tfds.ReadConfig(options=dataset_options)
+
     if isinstance(dataset_builder, tfds.core.DatasetBuilder):
       dataset_builder.download_and_prepare()
       ds = dataset_builder.as_dataset(
         split=split, shuffle_files=True, read_config=read_config)
     else:
       ds = dataset_builder.with_options(dataset_options)
+
     ds = ds.repeat(count=num_epochs)
     ds = ds.shuffle(shuffle_buffer_size)
     ds = ds.map(preprocess_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=True)
+
     return ds.prefetch(prefetch_size)
 
-  train_ds = create_dataset(dataset_builder, train_split_name)
-  eval_ds = create_dataset(dataset_builder, eval_split_name)
+  #IF STATEMENT IS CUSTOM ADDITION
+  if config.data.dataset not in ['VELOCITY_FINE', 'VELOCITY_DIFFERENCE']:
+    train_ds = create_dataset(dataset_builder, train_split_name) #get the training dataset
+    eval_ds = create_dataset(dataset_builder, eval_split_name) #get the evaluation dataset
+  
+  else:
+    if config.data.dataset == 'VELOCITY_FINE':
+      dataset_path = '/home/sravula/experiments/datasets/8047_vel_imgs.npy'
+    else:
+      dataset_path = '/home/sravula/experiments/datasets/8047_dy_vel_imgs.npy'
+    
+    tran_transform = transforms.Compose([
+        transforms.Resize(size = [config.data.image_size, config.data.image_size], \
+          interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
+        transforms.RandomHorizontalFlip(p=0.5)
+    ])
+
+    dataset = Velocity(path=dataset_path, transform=tran_transform)
+
+    num_items = len(dataset)
+    indices = list(range(num_items))
+    random_state = np.random.get_state()
+    np.random.seed(2240)
+    np.random.shuffle(indices)
+    np.random.set_state(random_state)
+    train_indices, test_indices = indices[:int(num_items * 0.9)], indices[int(num_items * 0.9):]
+
+    test_dataset = Subset(dataset, test_indices)
+    dataset = Subset(dataset, train_indices)
+
+    train_ds = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=8)
+    eval_ds = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True)
+    dataset_builder = None
+
   return train_ds, eval_ds, dataset_builder

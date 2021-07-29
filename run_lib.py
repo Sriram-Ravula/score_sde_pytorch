@@ -78,6 +78,7 @@ def train(config, workdir):
   initial_step = int(state['step'])
 
   # Build data iterators
+  #TODO here is the part we are concerened with for custom datasets
   train_ds, eval_ds, _ = datasets.get_dataset(config,
                                               uniform_dequantization=config.data.uniform_dequantization)
   train_iter = iter(train_ds)  # pytype: disable=wrong-arg-types
@@ -124,9 +125,11 @@ def train(config, workdir):
 
   for step in range(initial_step, num_train_steps + 1):
     # Convert data to JAX arrays and normalize them. Use ._numpy() to avoid copy.
-    batch = torch.from_numpy(next(train_iter)['image']._numpy()).to(config.device).float()
-    batch = batch.permute(0, 3, 1, 2)
+    #batch = torch.from_numpy(next(train_iter)['image']._numpy()).to(config.device).float()
+    batch = torch.from_numpy(next(train_iter)._numpy()).to(config.device).float() #This replaces the above line for velocity
+    #batch = batch.permute(0, 3, 1, 2) #remove this line for velocity since it is already in (N, C, H, W) form instead of (N, H, W, C)
     batch = scaler(batch)
+    
     # Execute one training step
     loss = train_step_fn(state, batch)
     if step % config.training.log_freq == 0:
@@ -139,8 +142,9 @@ def train(config, workdir):
 
     # Report the loss on an evaluation dataset periodically
     if step % config.training.eval_freq == 0:
-      eval_batch = torch.from_numpy(next(eval_iter)['image']._numpy()).to(config.device).float()
-      eval_batch = eval_batch.permute(0, 3, 1, 2)
+      #eval_batch = torch.from_numpy(next(eval_iter)['image']._numpy()).to(config.device).float()
+      eval_batch = torch.from_numpy(next(eval_iter)._numpy()).to(config.device).float() #replaces above line for velocity
+      #eval_batch = eval_batch.permute(0, 3, 1, 2) #remove this line for velocity as it is already in (N, C, H, W) format
       eval_batch = scaler(eval_batch)
       eval_loss = eval_step_fn(state, eval_batch)
       logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
@@ -162,7 +166,7 @@ def train(config, workdir):
         tf.io.gfile.makedirs(this_sample_dir)
         nrow = int(np.sqrt(sample.shape[0]))
         image_grid = make_grid(sample, nrow, padding=2)
-        sample = np.clip(sample.permute(0, 2, 3, 1).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+        sample = np.clip(sample.permute(0, 2, 3, 1).cpu().numpy() * 255, 0, 255).astype(np.uint8) #THIS IS CORRECT FOR SAVING IN NUMPY FORMAT
         with tf.io.gfile.GFile(
             os.path.join(this_sample_dir, "sample.np"), "wb") as fout:
           np.save(fout, sample)

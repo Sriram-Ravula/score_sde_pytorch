@@ -35,6 +35,7 @@ flags.mark_flags_as_required(["workdir", "config", "mode"])
 
 
 def main(argv):
+  
   if FLAGS.mode == "train":
     # Create the working directory
     tf.io.gfile.makedirs(FLAGS.workdir)
@@ -57,4 +58,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+  print("HELLO")
   app.run(main)
